@@ -1,0 +1,541 @@
+---
+title: "Analysis of Wisconsin data set for Breast Cancer"
+output: html_document
+font-family: 'Helvetica'
+---
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+library(caret)
+library(plyr)
+library(RANN)
+library(randomForest)
+require(pROC)
+bcw <- read.csv("breast-cancer-wisconsin.data", header = F)
+columns <- c("code_num","clump_thickness", "uniformity_cell_size","uniformity_cell_shape","marginal_adhesion", "single_epith_cell_size","bare_nuclei", "bland_chromatim", "normal_nucleoli", "mitoses", "class")
+colnames(bcw) <- columns
+bcw$class <- as.factor(bcw$class)
+do.type <- function(classtype)
+{
+  if (classtype == "2") {retval = "Benign"}
+  if (classtype == "4") {retval = "Malignant"}
+  retval
+}
+bcw$Class <- as.factor(sapply( bcw$class, do.type))
+bcw$Bare_Nuclei <- as.numeric(as.character(bcw$bare_nuclei)) ## NAs are introduced where this value is not available.
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+do.kmeans <- function(ncentres, df.kmeans.predictors, df.kmeans.response)
+{
+  kClust <- kmeans(df.kmeans.predictors,centers = ncentres) 
+  df.test <- data.frame(table(kClust$cluster,df.kmeans.response))
+  #df.test
+  error.count <- sum(sapply(1:ncentres, calculate.kmean.error, df.test))  
+  return(error.count)
+}
+calculate.kmean.error <- function(colindex, df.test)
+{
+  return(min(df.test[df.test[,1]==colindex, 3]))
+ 
+}
+myplclust <- function( hclust, lab=hclust$labels, lab.col=rep(1,length(hclust$labels)), hang=0.1,...){
+ ## modifiction of plclust for plotting hclust objects *in colour*!
+ ## Copyright Eva KF Chan 2009
+ ## Arguments:
+ ##    hclust:    hclust object
+ ##    lab:        a character vector of labels of the leaves of the tree
+ ##    lab.col:    colour for the labels; NA=default device foreground colour
+ ##    hang:     as in hclust & plclust
+ ## Side effect:
+ ##    A display of hierarchical cluster with coloured leaf labels.
+ y <- rep(hclust$height,2)
+ x <- as.numeric(hclust$merge)
+ y <- y[which(x<0)]
+ x <- x[which(x<0)]
+ x <- abs(x)
+ y <- y[order(x)]
+ x <- x[order(x)]
+ plot( hclust, labels=FALSE, hang=hang, ... )
+ text( x=x, y=y[hclust$order]-(max(hclust$height)*hang), labels=lab[hclust$order], col=lab.col[hclust$order], srt=90, adj=c(1,0.5), xpd=NA, ... )}
+df.classifier.performance <- data.frame(Model = character(), Error_Rate= numeric(0), stringsAsFactors = F)
+#p <- ggplot(df.r, aes(x=Iterations, y=Errors))
+#p + geom_line()
+#p + geom_line(colour = "blue", size = 1) + theme_bw()
+```
+
+## Introduction:
+Analysis of "Breast Cancer Wisconsin (Diagnostic) Data Set". The dataset is available from "UCI Machine Learning Repository". Data used is  "breast-cancer-wisconsin.data"" (1) and "breast-cancer-wisconsin.names"(2).
+
+## About the data:
+
+The dataset has 11 variables with 699 observations, first variable is the identifier and has been excluded in the analyis. 
+Thus, there are **9 predictors** and **a response** variable (class). The response variable denotes "Malignant" or "Benign" cases.
+
+### Predictor variables are:
+
+* Clump Thickness        
+* Uniformity of Cell Size 
+* Single Epithelial Cell Size  
+* Bare Nuclei
+* Uniformity of Cell Shape   
+* Bland Chromatin            
+* Mitoses 
+* Marginal Adhesion          
+* Normal Nucleoli            
+
+
+### Response variable is:
+Class - (2 for benign, 4 for malignant)
+
+There are 16 observations where data is incomplete. In further analysis, these cases are imputed (substitued by most likely values) or ignored. In total, there are 241 cases of malignancy, where as benign cases are 458.
+
+Detailed summary of all predictors and response variables are as following.
+```{r echo=FALSE, message=FALSE}
+#table(cc <- complete.cases(bcw))
+bcw.summary <- bcw[,c(2,3,4,5,6,8,9,10,13,12)]
+summary(bcw.summary)
+```
+
+
+## Exploratory Analysis
+
+### Histograms
+Following is the pictorial representation of occurrences of Malignant/Benign cases based on the variables. Figures are categorized in such a way that we can understand what is distribution of various variables.  E.g. it appears that Malign cases decrease and Benign cases increase as clump_thickness increases.For Bare Nuclei, this can be seen that malignant cases increase with increase in this variable. The higher the bands are, more the number of occurrences for that type.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=10, fig.height=3 }
+
+```
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+save(bcw.summary, file = "bcw.summary")
+m2 <- ggplot( bcw.summary , aes( clump_thickness, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m4 <- ggplot( bcw.summary , aes( Bare_Nuclei, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m6 <- ggplot( bcw.summary , aes( mitoses, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m7 <- ggplot( bcw.summary , aes( uniformity_cell_size, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m8 <- ggplot( bcw.summary , aes( uniformity_cell_shape, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m9 <- ggplot( bcw.summary , aes( marginal_adhesion, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m10 <- ggplot( bcw.summary , aes( single_epith_cell_size, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m11 <- ggplot( bcw.summary , aes( bland_chromatim, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+m12 <- ggplot( bcw.summary , aes( normal_nucleoli, fill=Class ) )+ geom_histogram() +  scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) + theme_bw() + facet_grid( . ~ Class ) + theme(legend.position = "none")
+
+```
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=10, fig.height=9 }
+multiplot(m2,m4,m6,m7,m8,m9,m10,m11,m12, cols=3)
+```
+
+### Boxplots
+
+Boxplots(3) are another way of showing the various attributes. With the help of these, we can understand what are the median values for Benign or Malignant cases. e.g, in the case of "Bare Nuclei", the median value is 1.0 for Benign cases, and 10.0 for Malignant ones. The dots tell that there are some values which are outliers, exception cases. 
+An observation here is that, the median value of various variables is much higher in Malignant cases.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+g1 <- ggplot(bcw, aes(x = Class,y = clump_thickness, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g2 <- ggplot(bcw, aes(x = Class,y = Bare_Nuclei, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g3 <- ggplot(bcw, aes(x = Class,y = mitoses, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g4 <- ggplot(bcw, aes(x = Class,y = uniformity_cell_size, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g5 <- ggplot(bcw, aes(x = Class,y = uniformity_cell_shape, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g6 <- ggplot(bcw, aes(x = Class,y = marginal_adhesion, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g7 <- ggplot(bcw, aes(x = Class,y = single_epith_cell_size, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g8 <- ggplot(bcw, aes(x = Class,y = bland_chromatim, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+g9 <- ggplot(bcw, aes(x = Class,y = normal_nucleoli, fill = Class)) +  geom_boxplot(aes(group=Class)) + theme_bw() + scale_fill_manual( values=c("Benign"="#3399FF","Malignant"="#FF6666" ) ) +  theme(legend.position = "none")
+
+```
+
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=10, fig.height=9 }
+multiplot(g1, g2, g3,g4,g5,g6,g7,g8,g9, cols=3)
+```
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+df.svd <- bcw[complete.cases(bcw), c(2,3,4,5,6,8,9,10,13)]
+svd1 = svd(scale(df.svd)) 
+df.svd.ggplot <- data.frame(svd1$u[,1:2])
+class <- bcw[complete.cases(bcw), c(11)]
+classlabel <- bcw[complete.cases(bcw), c(12)]
+df.svd.ggplot$Type <- classlabel
+my_colors <- c('#3399FF',  '#FF6666')
+svdg <- ggplot(df.svd.ggplot, aes(x = X1,y = X2, color= Type)) +  geom_point()  + theme_bw() 
+svdg <-  svdg + geom_jitter(position = "jitter", width = 0.9)
+svdg <- svdg + scale_color_manual(values = my_colors)
+#my_colors <- c('#3399FF',  '#FF6666')
+svdg.bar <- ggplot(df.svd.ggplot, aes(x = Type, fill = Type) ) + geom_bar() + theme_bw() 
+svdg.bar  <- svdg.bar + scale_fill_manual(values= my_colors)
+maxContrib <- which.max(svd1$v[,2])
+#maxContrib1 <- which.max(svd1$v[,1])
+#names(df.svd)[maxContrib] 
+```
+## Advanced Statistical Techniques
+### Singular Value Decomposition
+
+Singular Value Decomposition or SVD (4) is a technique to reduce the number of variables without losing the features of a dataset. This is especially useful when there is large amount of data to process, as it saves time and computing power. Though our dataset is a small one, we are doing this analysis to identify any pattern.
+
+After doing SVD, it is found out whether the given dataset can be reduced to lesser number of variables. Following plot confirms that with couple of representative variables, the dataset converges into two distinct clusters, Malignant and Benign, with few overlapping values.
+
+Note: The benign area appears to have lesser number of cases, this is due to overlapping of points. The adjoining bar chart provides the actual distribution of this dataset.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=8, fig.height=3 }
+multiplot(svdg, svdg.bar, cols=2)
+
+```
+
+### Clustering wih Dendrograms
+
+After SVD, clustering techniques are used to evaluate variable performance. With the help of clustering techniques, it is determined whether the data points converge into distinct clusters. Couple of plots are drawn, one with lesser number of variables and the second, which includes all variables. As the plot provides two distinct clusters, with some overlap, the second plot looks more complete. Hence, all variables should be considered for analysis.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=8, fig.height=3 }
+
+par(mfrow = c(1,2))
+df.svd <- bcw[complete.cases(bcw), c(2,3,4,5,13)]
+class <- bcw[complete.cases(bcw), c(11)]
+ck <- as.numeric(as.character(class))
+distanceMatrix <- dist(df.svd[,]) 
+hclustering <- hclust(distanceMatrix) 
+myplclust(hclustering,lab.col=ck)
+
+df.svd <- bcw[complete.cases(bcw), c(2,3,4,5,6,9,10,13,8)]
+class <- bcw[complete.cases(bcw), c(11)]
+ck <- as.numeric(as.character(class))
+distanceMatrix <- dist(df.svd[,]) 
+hclustering <- hclust(distanceMatrix) 
+myplclust(hclustering,lab.col=ck)
+
+```
+
+
+
+
+## Machine Learning Algortihms
+
+
+### K Means Clustering for classification of data
+
+K Means Clustering(5) is an algorithm, which is used to create clusters within a data set. Though these are primarily used in unsupervised(unlabeled) learning, we are using it here to see whether it is possible to map various clusters to a Benign or Malignant category. The algorithm has been run for a number of 50 clusters and error rate was recorded. It was found that a model with 37 clusters provides a lower error rate. The number of clusters required for a binary classification (Maignant/Benign) is too high to do further analysis.
+
+Following is a pictorial representation of error over cluster size.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=8, fig.height=4 }
+df.svd <- bcw[complete.cases(bcw), c(2,3,4,5,6,8,9,10,13)]
+classlabel <- bcw[complete.cases(bcw), c(12)]
+df.kmeans.predictors <- df.svd[,c(1:9)]
+df.kmeans.response <- classlabel
+
+set.seed(12345)
+numcenters <- 50
+df.r <- data.frame()
+for (counter in 2:numcenters) 
+{
+e.c <- do.kmeans(counter, df.kmeans.predictors, df.kmeans.response )
+roe <- c(counter,e.c)
+df.r <- rbind(df.r, roe)
+}
+#str(df.r)
+save(df.r, file ="df.r")
+colnames(df.r) <- c("Clusters", "Errors")
+p <- ggplot(df.r, aes(x=Clusters, y=Errors))
+p + geom_line(colour = "blue", size = 1) + theme_bw()
+#df.r
+```
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## Random Forest full model.
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+#colnames(bcws)
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+#str(bcws)
+bcws.training.predictors <- bcws.training[,c(-9)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+classe.column <- which(colnames(bcws.training)=='Class')
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+#length(bcws.data$clump_thickness)
+#mod.GBM <- train(classe ~ ., method = "gbm", data = bcws.data, verbose = FALSE)
+#head(bcws.data)
+mod.rf.full <- train(classe ~ ., method = "rf", data = bcws.data) 
+save(mod.rf.full, file ='mod.rf.full.RData')
+
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.rf.full, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("Random Forest - Full", error.percent)
+####################
+```
+
+### Random Forests
+
+Couple of models were built using Random Forests(6). One with including all variables and another with leaving out those variables which were not important. This was found out after analyzing variables from full model.
+
+**Building a Random Forest classifier (full):**
+
+A Random Forest classifier has been built with all the variables. 20% of the data was kept aside for validation and checking out of sample errors and model was built with 80% of data. This model was then tested on the 20% of the data. The error rate was found to be `r error.percent `.
+
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## Random Forest Partial model.
+#varImp(mod.rf.full)
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+bcws <- bcws[-c(1,8,4,7)] # removing clump_thickness, normal_nucleoli, mitoses and marginal_adhesion
+
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+#str(bcws)
+bcws.training.predictors <- bcws.training[,c(-5)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+classe.column <- which(colnames(bcws.training)=='Class')
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+#length(bcws.data$clump_thickness)
+#mod.GBM <- train(classe ~ ., method = "gbm", data = bcws.data, verbose = FALSE)
+#head(bcws.data)
+mod.rf.partial <- train(classe ~ ., method = "rf", data = bcws.data) 
+save(mod.rf.partial, file ='mod.rf.partial.RData')
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.rf.partial, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("Random Forest - Partial", error.percent)
+
+#error.percent (5.03% of error are found by this)
+#plot(mod.rf.full)
+####################
+```
+
+**Building a Random Forest classifier (partial):**
+
+This classifier has been built by leaving **clump_thickness, normal_nucleoli, mitoses and marginal_adhesion**  out. This was built on 80% of data. This model was then tested on the 20% of the data. The error rate was found to be `r error.percent `.
+As the error percentage has increased on out of sample errors, the full model should be considered for final analysis.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## RPART CLASSIFIER full model.
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+#colnames(bcws)
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+#str(bcws)
+bcws.training.predictors <- bcws.training[,c(-9)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+classe.column <- which(colnames(bcws.training)=='Class')
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+mod.rpart.full <- train(classe ~ ., method = "rpart", data = bcws.data) 
+save(mod.rpart.full, file ='mod.rpart.full.RData')
+
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.rpart.full, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("Decison tree - Full", error.percent)
+#varImp(mod.rpart.full)
+####################
+```
+
+### Decision Trees
+
+Similar to Random Forests, Couple of models were built using Decision Trees(7). One with including all variables and another with leaving out those variables which were not important. These variables were found after analyzing variables from full model.
+
+**Building a Rpart (Decision Tree) classifier (full): **
+
+A Decision tree classifier has been built with all the variables. 20% of the data was kept aside for validation and checking out of sample errors, and the model was built on 80% of data. The error rate was found to be `r error.percent `.
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## RPART CLASSIFIER Partial model.
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+bcws <- bcws[,-c(1,8,7,4)] # removed marginal_adhesion, clump_thickness, mitoses and normal_nucleoli.
+
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+classe.column <- which(colnames(bcws.training)=='Class')
+bcws.training.predictors <- bcws.training[,c(-classe.column)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+mod.rpart.partial <- train(classe ~ ., method = "rpart", data = bcws.data) 
+save(mod.rpart.partial, file ='mod.rpart.partial.RData')
+
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.rpart.partial, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("Decison tree - Partial", error.percent)
+####################
+```
+
+
+**Building a Rpart (Decision Tree) classifier (partial):**
+
+A Decision tree classifier has been built leaving out the variables **marginal_adhesion, clump_thickness, mitoses and normal_nucleoli** . 20% of the data was kept aside for validation and checking out of sample errors. Model was built on 80% of data. The error rate was found to be `r error.percent `.
+
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## KNN FULL CLASSIFIER
+#head(bcw)
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+classe.column <- which(colnames(bcws.training)=='Class')
+bcws.training.predictors <- bcws.training[,c(-classe.column)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+mod.knn.full <- train(classe ~ ., method = "knn", data = bcws.data) 
+save(mod.knn.full, file ='mod.knn.full.RData')
+
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.knn.full, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("KNN classifier - Full", error.percent)
+
+```
+
+### K Nearest Neighbours (KNN)
+
+Similar to above, Couple of models were built using KNN(7). One with including all variables and another with leaving out those variables which were not important. These variables were found after analyzing variables from full model.
+
+**Building a KNN classifier (with all variables):**
+
+A KNN classifier has been built with all the variables. 20% of the data was kept aside for validation and checking out of sample errors. The model was built on 80% of data. The error rate was found to be `r error.percent `.
+
+```{r echo=FALSE, warning=FALSE, message = FALSE }
+## KNN Classifier partial
+
+set.seed(100)
+bcws <- bcw[,-c(1,7,11)]
+bcws <- bcws[,-c(8,4,7)] # Mitoses, marginal_adhesion and normal_nucleoli removed.
+bcws.inTrain <- createDataPartition(y=bcws$Class, p = 0.8, list = FALSE)
+bcws.training <- bcws[bcws.inTrain,]
+bcws.testing <- bcws[-bcws.inTrain,]
+classe.column <- which(colnames(bcws.training)=='Class')
+bcws.training.predictors <- bcws.training[,c(-classe.column)]
+preimputation.obj <- preProcess(bcws.training.predictors, method = "knnImpute") 
+bcws.imputed.training.predictors <- predict(preimputation.obj, bcws.training.predictors)
+## Data imputation
+
+#classe.column
+bcws.training.classe <- bcws.training[,c(classe.column)]
+bcws.data <- cbind(bcws.imputed.training.predictors, classe = bcws.training.classe)
+mod.knn.partial <- train(classe ~ ., method = "knn", data = bcws.data) 
+save(mod.knn.partial, file ='mod.knn.partial.RData')
+
+classe.column <- which(colnames(bcws.testing)=='Class')
+testing.classe <- bcws.testing[,c(classe.column)]
+bcws.testing.predictors <- bcws.testing[,-c(classe.column)]
+bcws.imputed.testing.predictors <- predict(preimputation.obj, bcws.testing.predictors)
+predict.testing <- predict(mod.knn.partial, newdata =  bcws.imputed.testing.predictors)
+correct.results <- (predict.testing == testing.classe)
+error.percent <- round(100 * length(correct.results[correct.results == FALSE])/ length(correct.results),2)
+df.classifier.performance[nrow(df.classifier.performance)+1, ] <- c("KNN classifier - Partial", error.percent)
+```
+
+**Building a KNN classifier (Partial):**
+
+Based on the variable importane obtained from the full classfier, A KNN classifier with lesser number of variables has been built.For this classifier, **mitoses, marginal_adhesion and normal_nuleoli** have been removed.  20% of the data was kept aside for validation and checking out of sample errors. The model was built with 80% of data. The error rate was found to be `r error.percent `.
+
+## Inference
+
+Three different algorithms for classification are tried - with all varibles and with variable selection. Generally, it is found that errors were increased when variables were decreased, with an exception. With KNN, a model with lesser number of variables has performed better than all other models. As this is a small dataset, this could be a case of overfitting. Second option is to use Random Forest full classifier, as it does better than the KNN Classifier with all variables. Decision trees are showing high error rate, so this could be ignored.
+
+
+```{r echo=FALSE, warning=FALSE, message = FALSE, fig.align='left', fig.width=8, fig.height=3}
+#df.classifier.performance$Error_Rate <- round(df.classifier.performance$Error_Rate,2)
+
+df.classifier.performance$Error_Rate <- as.numeric(df.classifier.performance$Error_Rate)
+save(df.classifier.performance, file = "df.classifier.performance")
+perf.bar <- ggplot(df.classifier.performance, aes(x=Model, y=Error_Rate)) + theme_bw()
+p2 <- perf.bar  + geom_bar(stat = "identity", fill = I("#FF6666"), width = .5) 
+p2 + coord_flip() + ylab("Error rate- Percentage of tested observations")
+```
+
+## References:
+
+1. http://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/breast-cancer-wisconsin.data (Accessed: 06 Dec, 2014)
+2. http://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/breast-cancer-wisconsin.names (Accessed: 06 Dec, 2014)
+3. Boxplots - http://en.wikipedia.org/wiki/Box_plot (Accessed: 07 Dec, 2014)
+4. Singular Value Decomposition - http://en.wikipedia.org/wiki/Singular_value_decomposition (Accessed: 07 Dec, 2014)
+5. Kmeans - http://en.wikibooks.org/wiki/Data_Mining_Algorithms_In_R/Clustering/K-Means (Accessed: 07 Dec, 2014)
+6. Random Forests - http://en.wikipedia.org/wiki/Random_forest (Accessed: 07 Dec, 2014)
+7. Decision Tress - http://en.wikibooks.org/wiki/Data_Mining_Algorithms_In_R/Classification/Decision_Trees (Accessed: 08 Dec, 2014)
+8. K Nearest Neighbours - http://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm (Accessed: 8 Dec, 2014)
+
+
+## Toolkit Used:
+
+Following are the main R Packages and Toolkits have been used to carry out the analysis.
+
+1. Caret - Classification and Regressin Trees.
+2. ggplot2. - Majority of figures are created using this package.
+3. randomForest.
+
